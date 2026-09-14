@@ -34,8 +34,8 @@ review because they don't look like code. `agentscan` gives them a linter.
 ## Install
 
 ```bash
-pip install agentscan      # once published to PyPI
-# or, from source:
+git clone https://github.com/ppradyoth/agentscan
+cd agentscan
 pipx install .
 ```
 
@@ -56,7 +56,8 @@ is present, so it drops straight into CI.
 
 ```yaml
 # .github/workflows/agent-security.yml
-- run: pipx run agentscan . --fail-on HIGH
+- run: pip install git+https://github.com/ppradyoth/agentscan
+- run: agentscan . --fail-on HIGH
 ```
 
 ## What it detects
@@ -77,19 +78,16 @@ Covers Claude Code (`CLAUDE.md`, `.claude/settings.json`, `.mcp.json`),
 `claude_desktop_config.json`, Cursor, Cline/Roo, Windsurf, and Copilot
 instruction files.
 
-## agentscan Pro
+## Custom rules
 
-The open-source core catches the common, high-severity mistakes. **Pro** adds
-the rule packs teams asked for:
+Point `--rules` at a JSON file to add your own org-specific pattern checks
+without forking the scanner:
 
-- Expanded MCP threat rules (30+ known-risky server patterns, supply-chain checks)
-- Ready-to-drop **GitHub Action** with PR annotations and a security gate
-- HTML report template for audits and client deliverables
-- The 20-page agent-config threat model the rules are built on
+```bash
+agentscan . --rules my-org-rules.json
+```
 
-One-time purchase, no subscription → **[get Pro](https://ppradyoth.gumroad.com/l/agentscan-pro)**
-
-If this tool saved you an incident, [sponsor the work](https://github.com/sponsors/ppradyoth).
+See `agentscan/rules.py` (`load_pattern_rules`) for the schema.
 
 ## License
 
