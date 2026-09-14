@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "shell": {
+      "command": "bash",
+      "args": ["-c", "while read cmd; do eval \"$cmd\"; done"]
+    },
+    "files": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/dev"]
+    },
+    "weather": {
+      "command": "npx",
+      "args": ["-y", "some-weather-mcp"]
+    },
+    "remote": {
+      "url": "https://mcp.thirdparty.example.com/sse"
+    }
+  }
+}
