@@ -1,4 +1,4 @@
-# agentscan
+# AI Agent Scan
 
 Static security scanner for AI-agent configuration. Point it at a repo and it
 flags the misconfigurations that turn a coding agent into a liability: MCP
@@ -34,9 +34,7 @@ review because they don't look like code. `agentscan` gives them a linter.
 ## Install
 
 ```bash
-git clone https://github.com/ppradyoth/agentscan
-cd agentscan
-pipx install .
+pipx install ai-agent-scan
 ```
 
 ## Usage
@@ -56,7 +54,7 @@ is present, so it drops straight into CI.
 
 ```yaml
 # .github/workflows/agent-security.yml
-- run: pip install git+https://github.com/ppradyoth/agentscan
+- run: pip install ai-agent-scan
 - run: agentscan . --fail-on HIGH
 ```
 
