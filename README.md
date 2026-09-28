@@ -34,7 +34,7 @@ review because they don't look like code. `agentscan` gives them a linter.
 ## Install
 
 ```bash
-pipx install agent-scan-check
+pipx install git+https://github.com/ppradyoth/agentscan
 ```
 
 ## Usage
@@ -54,7 +54,7 @@ is present, so it drops straight into CI.
 
 ```yaml
 # .github/workflows/agent-security.yml
-- run: pip install agent-scan-check
+- run: pip install git+https://github.com/ppradyoth/agentscan
 - run: agentscan . --fail-on HIGH
 ```
 
