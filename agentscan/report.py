@@ -31,7 +31,9 @@ def render_terminal(report: Report, color: bool = True) -> str:
         return "\n".join(out) + "\n"
     for f in findings:
         tag = _c(f.severity, f" {f.severity:<8}", color)
-        flag = " [heuristic]" if f.heuristic else ""
+        flag = (" [heuristic]" if f.heuristic else "") + \
+               (" [fixture]" if f.context == "fixture" else "")
+        flag += f" (confidence: {f.confidence})"
         out.append(f"{tag} {f.rule_id}  {f.title}{flag}")
         out.append(f"          {f.file}:{f.line}")
         out.append(f"          evidence: {f.evidence}")
@@ -51,6 +53,7 @@ def render_json(report: Report) -> str:
         {
             "files_scanned": report.files_scanned,
             "finding_count": len(report.findings),
+            "errors": [{"file": f, "error": e} for f, e in report.errors],
             "findings": [f.as_dict() for f in report.sorted()],
         },
         indent=2,
@@ -78,3 +81,35 @@ def render_markdown(report: Report) -> str:
                   f"- **Evidence:** `{f.evidence}`",
                   f"- **Fix:** {f.remediation}", ""]
     return "\n".join(lines) + "\n"
+
+
+_SARIF_LEVEL = {"CRITICAL": "error", "HIGH": "error", "MEDIUM": "warning",
+                "LOW": "note", "INFO": "note"}
+
+
+def render_sarif(report: Report) -> str:
+    from . import __version__
+    findings = report.sorted()
+    rule_ids = sorted({f.rule_id for f in findings})
+    return json.dumps({
+        "version": "2.1.0",
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "runs": [{
+            "tool": {"driver": {
+                "name": "agentscan", "version": __version__,
+                "informationUri": "https://github.com/ppradyoth/agentscan",
+                "rules": [{"id": r, "name": r} for r in rule_ids],
+            }},
+            "results": [{
+                "ruleId": f.rule_id,
+                "level": _SARIF_LEVEL[f.severity],
+                "message": {"text": f"{f.title}. {f.remediation}"},
+                "locations": [{"physicalLocation": {
+                    "artifactLocation": {"uri": f.file.replace("\\", "/")},
+                    "region": {"startLine": max(f.line, 1)},
+                }}],
+                "properties": {"confidence": f.confidence, "heuristic": f.heuristic,
+                               "context": f.context, "severity": f.severity},
+            } for f in findings],
+        }],
+    }, indent=2)

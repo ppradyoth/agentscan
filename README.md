@@ -46,6 +46,8 @@ agentscan .mcp.json                  # scan a single file
 agentscan . --format json            # machine-readable
 agentscan . --format markdown -o report.md
 agentscan . --min-severity HIGH      # hide the noise
+agentscan . --min-confidence medium  # drop low-confidence heuristics
+agentscan . --format sarif -o agentscan.sarif   # GitHub code scanning
 agentscan . --fail-on CRITICAL       # CI gate: non-zero exit on criticals
 ```
 
@@ -62,19 +64,43 @@ is present, so it drops straight into CI.
 
 | Rule | Severity | What it catches |
 |------|----------|-----------------|
-| AS001 | Critical | Permission bypass (`bypassPermissions`, `--dangerously-skip-permissions`), wildcard `Bash(*)`, shell-command MCP servers |
-| AS002 | High | MCP filesystem server rooted at `/`, `$HOME`, or a user home |
-| AS003 | High | Hooks that auto-run shell commands on tool events |
-| AS004 | Critical | Hardcoded API keys / tokens in agent config (redacted in output) |
-| AS005 | Medium | Instruction files that disable human confirmation ("without asking", "auto-approve") |
-| AS006 | Medium | External content routed to actions with no injection boundary |
-| AS007 | Medium | Unpinned `npx -y` MCP packages; remote MCP endpoints |
-| AS008 | Medium | Wildcard tool permissions |
-| AS009 | Medium | `alwaysAllow` / `autoApprove` MCP tool lists |
+| AS001 | Critical / High | Permission bypass (`bypassPermissions`, `--dangerously-skip-permissions`), unrestricted `Bash`/`*` grants, interpreter, package-runner and shell-escape grants (`Bash(python:*)`, `Bash(npx:*)`, `Bash(find:*)`), MCP servers that expose a shell |
+| AS002 | High | MCP filesystem server rooted at `/`, `$HOME`, a user home, a drive root |
+| AS003 | High / Low | Hooks that interpolate tool input into a shell, `eval`, or pipe fetched code to a shell (High); other committed hooks (Low) |
+| AS004 | Critical / High / Medium | Hardcoded credentials: provider-format keys (Anthropic, OpenAI, OpenRouter, GitHub, Slack, Notion, Context7, AWS, ...), credential-named fields with high-entropy values, credentials in URLs, private keys. Redacted in output |
+| AS005 | Low | Instruction files that disable human confirmation (negation-aware, skips code fences) |
+| AS006 | Low | External content routed to actions with no injection boundary (heuristic) |
+| AS007 | Medium / Info | MCP servers launched from an unpinned package or image (`npx -y`, `bunx`, `uvx`, `pipx`, `docker run`; floating tags such as `@latest` and version ranges count as unpinned). Remote endpoints are Info |
+| AS008 | Medium / Low | Wildcard tool permissions (`WebFetch(*)`, `Write(*)`); read-only wildcards are ignored |
+| AS009 | Medium / Low | `alwaysAllow` / `autoApprove` lists; Medium only when a tool name implies side effects |
+| AS010 | High | MCP server over an unencrypted remote transport (`http://`, `ws://`) |
+| AS011 | Medium | `enableAllProjectMcpServers: true` (auto-trusts MCP servers a cloned repo declares) |
+| AS012 | High | Invisible or bidirectional Unicode in instruction files and skills (rules-file backdoor) |
+| AS013 | High | Skills, commands and agents whose `allowed-tools` pre-approve arbitrary execution |
 
-Covers Claude Code (`CLAUDE.md`, `.claude/settings.json`, `.mcp.json`),
-`claude_desktop_config.json`, Cursor, Cline/Roo, Windsurf, and Copilot
-instruction files.
+Covers Claude Code (`CLAUDE.md`, `.claude/settings*.json`, `.mcp.json`, skills, commands, agents),
+Claude Desktop, Cursor, VS Code (`servers`), Cline/Roo, Windsurf, Gemini CLI, Codex
+(`config.toml`), Zed, and Copilot instruction files. JSON with comments and trailing commas
+is parsed.
+
+### Confidence and context
+
+Every finding carries a `confidence` (`high`, `medium`, `low`). File-level, structural checks
+(unpinned launchers, interpreter grants, provider-format secrets, hidden Unicode) are `high`.
+Prose rules and generic credential-field matches are `low` or `medium`. Filter with
+`--min-confidence medium`.
+
+Findings in paths that look like tests, fixtures, examples, docs, datasets or templates are
+reported as `INFO` with `context: fixture`, so sample configs do not fail your CI. Use
+`--include-fixtures` to see them at full severity. Only known agent config locations are
+scanned by default; `--all-files` scans every JSON and YAML file.
+
+### Known limits
+
+- Static and heuristic: it reads files, it does not run servers or check whether a key is live.
+- It does not know whether an unpinned package is pinned by your lockfile or a wrapper script.
+- `AS003`, `AS005`, `AS006` and remote-endpoint findings are review prompts, not vulnerabilities.
+- Recall has not been measured against a labelled corpus.
 
 ## Custom rules
 

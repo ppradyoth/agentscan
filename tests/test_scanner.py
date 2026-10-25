@@ -33,7 +33,7 @@ class TestVulnSample(unittest.TestCase):
         secrets = [f for f in self.r.findings if f.rule_id == "AS004"]
         self.assertTrue(secrets)
         for f in secrets:
-            self.assertNotIn("FAKEKEYtestonly", f.evidence)
+            self.assertNotIn("Zq8Lw3Vn7Rk2Tb9Xc4Hd6Pm1Fy5Js0Ug", f.evidence)
 
 
 class TestCleanSample(unittest.TestCase):
