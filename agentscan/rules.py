@@ -109,7 +109,7 @@ def _entropy(s: str) -> float:
 _SECRET_PATTERNS = [
     ("Anthropic API key", re.compile(r"sk-ant-[A-Za-z0-9\-_]{20,512}")),
     ("OpenRouter API key", re.compile(r"sk-or-v1-[A-Za-z0-9]{32,512}")),
-    ("OpenAI API key", re.compile(r"sk-(?:proj-|svcacct-|admin-)?(?!ant-|or-)[A-Za-z0-9_\-]{20,512}")),
+    ("OpenAI API key", re.compile(r"(?<![A-Za-z0-9])sk-(?:proj-|svcacct-|admin-)?(?!ant-|or-)[A-Za-z0-9_\-]{20,512}")),
     ("Context7 API key", re.compile(r"ctx7sk-[A-Za-z0-9\-]{20,512}")),
     ("Google API key", re.compile(r"AIza[0-9A-Za-z\-_]{35}")),
     ("AWS access key id", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
@@ -127,10 +127,12 @@ _URL_CRED = re.compile(r"\b[a-z][a-z0-9+.\-]{0,20}://([^\s/:@\"']{1,128}):([^\s/
 
 _SECRET_KEY = re.compile(
     r"(api[_\-]?key|apikey|secret|token|passwd|password|access[_\-]?key|private[_\-]?key|"
-    r"auth(?:orization)?|credential|bearer)", re.I)
+    r"(?:^|[_\-.])auth(?:orization)?(?:$|[_\-.])|credential|bearer)", re.I)
 _NON_SECRET_KEY_SUFFIX = re.compile(
     r"(_|-)?(path|file|dir|url|uri|endpoint|name|id|env|header|headers|type|prefix|"
-    r"count|limit|ttl|timeout|expiry|expires|mode|method|scheme|label|field|var|file_?path)$", re.I)
+    r"count|limit|ttl|timeout|expiry|expires|mode|method|scheme|label|field|var|file_?path|"
+    r"domain|host|hostname|region|tenant|version|provider|server|realm|audience|issuer)$", re.I)
+_PUBLIC_PREFIXES = ("sb_publishable_", "pk_live_", "pk_test_", "pk.")
 
 _DOC_VALUES = {
     "akiaiosfodnn7example", "wjalrxutnfemi/k7mdeng/bpxrficyexamplekey",
@@ -172,6 +174,20 @@ def _strip_auth_scheme(v: str) -> str:
     return m.group(1) if m else v.strip()
 
 
+def _jwt_is_public(v: str) -> bool:
+    """True for JWTs whose payload marks them as a public, client-side key (role=anon)."""
+    parts = v.split(".")
+    if len(parts) != 3 or not v.startswith("eyJ"):
+        return False
+    import base64
+    try:
+        pad = parts[1] + "=" * (-len(parts[1]) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(pad))
+    except Exception:
+        return False
+    return isinstance(payload, dict) and str(payload.get("role", "")).lower() in ("anon", "anonymous")
+
+
 def _generic_secret_ok(key: str, val: str):
     """Return (severity, confidence) if key/value looks like a real inline credential."""
     k = key.lower()
@@ -181,6 +197,8 @@ def _generic_secret_ok(key: str, val: str):
     if len(v) < 16 or re.search(r"\s", v):
         return None
     if _looks_placeholder(v):
+        return None
+    if v.startswith(_PUBLIC_PREFIXES) or _jwt_is_public(v):
         return None
     if re.match(r"^(https?://|file:|\.{0,2}/|~|[A-Za-z]:[\\/])", v):
         return None
@@ -217,11 +235,13 @@ def _pattern_secret_hits(raw: str, relpath: str, seen: set) -> Iterator[Finding]
         if _looks_placeholder(pw) or pw in seen:
             continue
         seen.add(pw)
+        host = _url_host(m.group(0))
+        local = host in ("localhost", "127.0.0.1", "::1", "0.0.0.0") or _is_private_host(host)
         yield Finding(
-            "AS004", "Credentials embedded in a URL", "HIGH", relpath,
+            "AS004", "Credentials embedded in a URL", "LOW" if local else "HIGH", relpath,
             _line_of(raw, m.group(0)), re.sub(r":[^:@/]+@", ":***@", m.group(0)),
             "Pass credentials through environment variables or a secret store, not the URL.",
-            confidence="medium",
+            confidence="low" if local else "medium",
         )
 
 
@@ -280,28 +300,31 @@ def detect_secrets(raw: str, relpath: str, obj=None) -> Iterator[Finding]:
 
 # ---- hidden-character (rules-file backdoor) detection ----------------------
 
-_INVISIBLE = re.compile(
-    "[​⁠⁢⁣⁤‪-‮⁦-⁩\U000e0000-\U000e007f]")
-_ZWNJ_ASCII = re.compile(r"[A-Za-z0-9]‌[A-Za-z0-9]")
-_BOM_MID = re.compile(r"(?<!^)﻿")
+_STRONG_HIDDEN = re.compile("[\u202a-\u202e\u2066-\u2069\U000e0000-\U000e007f]")
+_WEAK_HIDDEN = re.compile("[\u200b\u2060\u2062\u2063\u2064]")
+_ZWNJ_ASCII = re.compile(r"[A-Za-z0-9]\u200c[A-Za-z0-9]")
+_BOM_MID = re.compile(r"(?<!^)\ufeff")
 
 
 def detect_hidden_text(raw: str, relpath: str) -> Iterator[Finding]:
-    hits = list(_INVISIBLE.finditer(raw)) + list(_ZWNJ_ASCII.finditer(raw))
-    mid = list(_BOM_MID.finditer(raw[1:] if raw.startswith("﻿") else raw))
-    hits += mid
+    strong = list(_STRONG_HIDDEN.finditer(raw))
+    weak = list(_WEAK_HIDDEN.finditer(raw)) + list(_ZWNJ_ASCII.finditer(raw)) + \
+        list(_BOM_MID.finditer(raw[1:] if raw.startswith("\ufeff") else raw))
+    hits = strong + weak
     if not hits:
         return
     first = min(h.start() for h in hits)
-    codes = sorted({f"U+{ord(c):04X}" for h in hits for c in h.group(0)
-                    if not c.isalnum()})[:6]
+    codes = sorted({f"U+{ord(c):04X}" for h in hits for c in h.group(0) if not c.isalnum()})[:6]
+    high = bool(strong) or len(weak) >= 8
     yield Finding(
         "AS012", "Invisible or bidirectional Unicode characters in agent instructions",
-        "HIGH", relpath, raw.count("\n", 0, first) + 1,
+        "HIGH" if high else "LOW", relpath, raw.count("\n", 0, first) + 1,
         f"{len(hits)} hidden character(s): {', '.join(codes)}",
         "Remove hidden characters. They can smuggle instructions the human reviewer "
-        "cannot see (rules-file backdoor).",
-        confidence="high",
+        "cannot see (rules-file backdoor)." if high else
+        "Stray zero-width characters are usually accidental, but remove them so no "
+        "instruction can hide in the file.",
+        confidence="high" if high else "low",
     )
 
 
@@ -309,7 +332,7 @@ def detect_hidden_text(raw: str, relpath: str) -> Iterator[Finding]:
 
 _AUTO_AUTH = re.compile(
     r"(?i)\b(without asking|do ?n'?t ask|no confirmation|without confirmation|"
-    r"auto[- ]?approve|automatically approve|always (?:allow|run|execute)|"
+    r"auto[- ]?approve|automatically approve|"
     r"skip permission|bypass permission|run any command|yolo mode)\b"
 )
 _NEGATION_BEFORE = re.compile(
@@ -321,8 +344,9 @@ _SRC = re.compile(
     r"attached file|user-provided (?:file|document))\b"
 )
 _ACT = re.compile(
-    r"(?i)\b(execute|run (?:the|any)|follow (?:the|its|these) instructions|"
-    r"do what it says|comply with|obey|carry out|act on)\b"
+    r"(?i)\b(follow (?:the|its|these|any|all) (?:instructions|directions|commands)|"
+    r"do what it says|do whatever it says|obey|execute (?:the |any |all )?(?:commands?|instructions)|"
+    r"carry out (?:the |its |these )?instructions)\b"
 )
 _GUARD = re.compile(
     r"(?i)(not (?:be treated as |)instructions|treat .* as data|do not (?:treat|follow|obey|act)|"
@@ -354,10 +378,9 @@ def detect_instructions(raw: str, relpath: str) -> Iterator[Finding]:
         offset += len(line)
     if _GUARD.search(raw):
         return
-    para_start = 0
-    for para in re.split(r"\n\s*\n", raw):
-        src, act = _SRC.search(para), _ACT.search(para)
-        if src and act and not _NEGATION_BEFORE.search(para[:act.start()].split("\n")[-1]):
+    for sent in re.split(r"(?<=[.!?])\s+|\n{2,}", raw):
+        src, act = _SRC.search(sent), _ACT.search(sent)
+        if src and act and not _NEGATION_BEFORE.search(sent[:act.start()].split("\n")[-1]):
             yield Finding(
                 "AS006", "External content routed to actions without an injection boundary",
                 "LOW", relpath, _line_of(raw, act.group(0)), act.group(0),
@@ -366,7 +389,6 @@ def detect_instructions(raw: str, relpath: str) -> Iterator[Finding]:
                 heuristic=True, confidence="low",
             )
             break
-        para_start += len(para) + 2
 
 
 # ---- permission / grant analysis ------------------------------------------
@@ -416,26 +438,29 @@ def classify_grant(entry: str):
         if spec is None or spec.strip() in ("*", "*:*", ""):
             return ("AS001", "CRITICAL", "high",
                     f"Unrestricted shell permission allowed ({e})")
-        toks = [t for t in re.split(r"[\s:]+", spec.strip()) if t]
+        sp = spec.strip()
+        toks = [t for t in re.split(r"[\s:]+", sp) if t]
         cmd = os.path.basename(toks[0]).lower() if toks else ""
         rest = toks[1:]
         two = f"{cmd} {rest[0].lower()}" if rest else ""
-        # arbitrary only when nothing but a wildcard (or inline code) follows the launcher
-        bare = rest == [] or rest == ["*"]
-        bare2 = rest[1:] == [] or rest[1:] == ["*"]
-        inline = bool(rest) and rest[0].lower() in ("-c", "-e", "-lc", "/c", "-command")
+        # arbitrary execution needs an open wildcard: `python:*`, `python *`, `python -c:*`
+        wild = sp.endswith("*")
+        open1 = wild and rest in ([], ["*"])
+        open2 = wild and rest[1:] in ([], ["*"])
+        inline = wild and bool(rest) and rest[0].lower() in ("-c", "-e", "-lc", "/c", "-command") \
+            and (len(rest) == 1 or re.fullmatch(r"[\"']?\*?[\"']?", "".join(rest[1:])) is not None)
         if toks and toks[0] == "*":
             return ("AS001", "CRITICAL", "high", f"Unrestricted shell permission allowed ({e})")
-        if cmd in _INTERPRETERS and (bare or inline):
+        if cmd in _INTERPRETERS and (open1 or inline):
             return ("AS001", "HIGH", "high",
                     f"Interpreter grant allows arbitrary code execution ({e})")
-        if (cmd in _PKG_RUNNERS and bare) or (two in _PKG_RUNNERS and bare2):
+        if (cmd in _PKG_RUNNERS and open1) or (two in _PKG_RUNNERS and open2):
             return ("AS001", "HIGH", "high",
                     f"Package-runner grant allows arbitrary code execution ({e})")
-        if cmd in _SHELL_ESCAPES and bare:
+        if cmd in _SHELL_ESCAPES and open1:
             return ("AS001", "HIGH", "medium",
                     f"Grant of a shell-escape capable tool ({e})")
-        if cmd in _NET_TOOLS and bare:
+        if cmd in _NET_TOOLS and open1:
             return ("AS008", "LOW", "medium", f"Network tool granted with wildcard arguments ({e})")
         return None
     if spec is not None and spec.strip() in ("*", ""):
@@ -448,9 +473,8 @@ def classify_grant(entry: str):
 
 
 _HOOK_DANGER = re.compile(
-    r"(\$\{?CLAUDE_TOOL_INPUT|\$\{?TOOL_INPUT|\$\{?TOOL_ARGS|\beval\b|"
-    r"\|\s*(?:ba|z)?sh\b|\bcurl\b[^|;]*\|\s*(?:ba|z)?sh|\bwget\b[^|;]*\|\s*(?:ba|z)?sh|"
-    r"\bnc\s+-|/dev/tcp/)")
+    r"((?<![\w./-])eval\s+[\"'$`(]|\|\s*(?:ba|z)?sh\s*(?:$|[;&)\n])|\bcurl\b[^|;]*\|\s*(?:ba|z)?sh\b|"
+    r"\bwget\b[^|;]*\|\s*(?:ba|z)?sh\b|\bnc\s+-|/dev/tcp/|\bbase64\s+-d[^|;]*\|\s*(?:ba|z)?sh)")
 _RISKY_TOKENS = {"exec", "execute", "shell", "bash", "command", "cmd", "run", "write", "delete",
                  "remove", "edit", "create", "send", "post", "push", "deploy", "install", "kill",
                  "move", "rename", "upload", "drop", "update", "insert", "click", "navigate",
@@ -467,14 +491,15 @@ def _risky_tool(name: str) -> bool:
 # ---- JSON / TOML config detectors ------------------------------------------
 
 _WRAPPER_DANGER = re.compile(
-    r"(\beval\b|\bread\b|\$[@*0-9]|\$\{[@*0-9]|\bxargs\b|/dev/tcp|\bnc\b|\|\s*(?:ba|z)?sh\b)")
+    r"((?<![\w./-])eval\s+[\"'$`(]|(?:^|[;&|(]\s*|\bwhile\s+)(?<![-\w])read\s+(?:-[a-zA-Z]+\s+)*[A-Za-z_]\w*\s*(?:;|\||$)|"
+    r"/dev/tcp|\bnc\s+-|\|\s*(?:ba|z)?sh\s*(?:$|[;&)\n]))")
 
-_SERVER_CONTAINER_KEYS = ("mcpServers", "mcp_servers", "context_servers", "servers")
+_SERVER_CONTAINER_KEYS = ("mcpServers", "mcp_servers", "context_servers", "servers", "mcp")
 
 
 def _is_server_spec(spec) -> bool:
     return isinstance(spec, dict) and any(
-        k in spec for k in ("command", "url", "serverUrl", "httpUrl", "baseUrl"))
+        k in spec for k in ("command", "url", "serverUrl", "httpUrl", "baseUrl", "uri"))
 
 
 def detect_json(raw: str, relpath: str, obj=None) -> Iterator[Finding]:
@@ -593,7 +618,7 @@ def _detect_structured(obj, raw: str, relpath: str) -> Iterator[Finding]:
                 danger = bool(_HOOK_DANGER.search(cmd))
                 yield Finding(
                     "AS003",
-                    "Hook builds a shell command from tool input or fetches code"
+                    "Hook evaluates dynamic input or fetches and executes code"
                     if danger else "Hook auto-runs a shell command on agent tool events",
                     "HIGH" if danger else "LOW", relpath, _line_of(raw, cmd[:30]), cmd[:80],
                     "Ensure hook commands can't be influenced by tool inputs; avoid "
@@ -604,16 +629,25 @@ def _detect_structured(obj, raw: str, relpath: str) -> Iterator[Finding]:
     # mcp servers
     for key in _SERVER_CONTAINER_KEYS:
         for servers in _find_keys(obj, key):
-            if not isinstance(servers, dict):
+            if isinstance(servers, list):  # Continue: [{"name": ..., "command": ...}]
+                items = [(str(x.get("name", f"[{i}]")), x) for i, x in enumerate(servers)
+                         if isinstance(x, dict)]
+            elif isinstance(servers, dict):
+                items = [(str(k), v) for k, v in servers.items()]
+            else:
                 continue
-            for name, spec in servers.items():
+            for name, spec in items:
                 if _is_server_spec(spec):
-                    yield from _check_mcp_server(str(name), spec, raw, relpath, emitted)
+                    yield from _check_mcp_server(name, spec, raw, relpath, emitted)
+
+    yield from _detect_settings_risks(obj, raw, relpath, once)
 
 
 # ---- MCP server checks -----------------------------------------------------
 
 _SEMVER = re.compile(r"^v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.\-]+)?$")
+_PY_EXACT_VER = re.compile(r"^v?\d+\.\d+(?:\.\d+)*(?:[.\-+]?[A-Za-z0-9][A-Za-z0-9.\-+]*)?$")
+_LOCAL_PATH = re.compile(r"^(?:/|\./|\.\./|~|[A-Za-z]:[\\/]|\\\\)")
 _PEP440_EXACT = re.compile(r"==\s*\d+(?:\.\d+)*(?:[a-zA-Z0-9.\-+]*)$")
 
 
@@ -632,7 +666,9 @@ def _split_npm_spec(spec: str):
 
 def _npm_unpinned(spec: str) -> str | None:
     """Return a reason string if unpinned, else None."""
-    if re.match(r"^(git\+|https?://|github:|file:|\.{0,2}/)", spec):
+    if _LOCAL_PATH.match(spec):
+        return None
+    if re.match(r"^(git\+|https?://|github:|file:)", spec):
         return None if "#" in spec and re.search(r"#[0-9a-f]{7,40}$", spec) else "unversioned source"
     name, ver = _split_npm_spec(spec)
     if not ver:
@@ -663,15 +699,15 @@ def _py_unpinned(args: list[str], runner: str) -> tuple[str, str] | None:
             continue
         pkg = a
         break
-    if not pkg:
+    if not pkg or _LOCAL_PATH.match(pkg):
         return None
-    if re.match(r"^(git\+|https?://|file:|\.{0,2}/)", pkg):
+    if re.match(r"^(git\+|https?://|file:)", pkg):
         return None if re.search(r"@[0-9a-f]{7,40}$", pkg) else (pkg, "unversioned source")
     if _PEP440_EXACT.search(pkg):
         return None
     if "@" in pkg:
         _, ver = pkg.split("@", 1)
-        return None if _SEMVER.match(ver) else (pkg, f"floating version @{ver}")
+        return None if _PY_EXACT_VER.match(ver) else (pkg, f"floating version @{ver}")
     return (pkg, "no exact version (==)")
 
 
@@ -694,9 +730,63 @@ def _docker_image(args: list[str]) -> str | None:
     return None
 
 
-def _check_mcp_server(name, spec, raw, relpath, emitted) -> Iterator[Finding]:
-    cmd = str(spec.get("command", ""))
+def _normalise_command(spec):
+    """Return (cmd, args) for the command shapes used by different clients."""
+    command = spec.get("command")
     args = [str(a) for a in _as_list(spec.get("args")) if not isinstance(a, (dict, list))]
+    if isinstance(command, list):  # opencode: ["npx", "-y", "pkg"]
+        parts = [str(a) for a in command if not isinstance(a, (dict, list))]
+        return (parts[0] if parts else ""), parts[1:] + args
+    if isinstance(command, dict):  # Zed: {"path": "npx", "args": [...]}
+        extra = [str(a) for a in _as_list(command.get("args")) if not isinstance(a, (dict, list))]
+        return str(command.get("path", "")), extra + args
+    return ("" if command is None else str(command)), args
+
+
+_HELPER_KEYS = ("apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper")
+
+
+def _detect_settings_risks(obj, raw, relpath, once) -> Iterator[Finding]:
+    for _, node in _walk(obj):
+        if not isinstance(node, dict):
+            continue
+        for k in _HELPER_KEYS:
+            v = node.get(k)
+            if isinstance(v, str) and v.strip() and once(("helper", k, v)):
+                yield Finding(
+                    "AS014", f"Project settings run a command at session start ({k})", "LOW",
+                    relpath, _line_of(raw, k), f"{k}: {v[:60]}",
+                    "A committed helper command runs on every contributor machine; review "
+                    "the script and prefer user-level settings.",
+                    confidence="medium")
+        sl = node.get("statusLine")
+        if isinstance(sl, dict) and sl.get("type") == "command" and sl.get("command") and \
+                once(("statusLine", str(sl.get("command")))):
+            yield Finding(
+                "AS014", "Project settings run a status-line command", "INFO", relpath,
+                _line_of(raw, "statusLine"), str(sl.get("command"))[:60],
+                "A committed status-line command runs on every contributor machine.",
+                confidence="medium")
+        ek = node.get("extraKnownMarketplaces")
+        if isinstance(ek, dict) and ek and once(("marketplaces", tuple(sorted(map(str, ek))))):
+            yield Finding(
+                "AS014", "Project settings register extra plugin marketplaces", "MEDIUM",
+                relpath, _line_of(raw, "extraKnownMarketplaces"),
+                ", ".join(list(map(str, ek))[:4]),
+                "Plugins from a marketplace can ship hooks and MCP servers; only register "
+                "marketplaces you control.",
+                confidence="medium")
+        for d in _as_list(node.get("additionalDirectories")):
+            if isinstance(d, str) and _HOME_ROOTS.match(d) and once(("addldir", d)):
+                yield Finding(
+                    "AS002", f"Agent granted access to a broad additional directory ({d})",
+                    "HIGH", relpath, _line_of(raw, d), d,
+                    "Scope additional directories to specific project paths.",
+                    confidence="high")
+
+
+def _check_mcp_server(name, spec, raw, relpath, emitted) -> Iterator[Finding]:
+    cmd, args = _normalise_command(spec)
     base = os.path.basename(cmd).lower()
     if base.endswith((".cmd", ".exe", ".bat")):
         base = base.rsplit(".", 1)[0]
@@ -716,12 +806,13 @@ def _check_mcp_server(name, spec, raw, relpath, emitted) -> Iterator[Finding]:
             confidence="medium" if danger else "low")
     elif _SHELL_MCP_NAME.search(joined) or _SHELL_MCP_NAME.search(cmd) or \
             _SHELL_MCP_NAME.search(name):
+        by_pkg = bool(_SHELL_MCP_NAME.search(joined) or _SHELL_MCP_NAME.search(cmd))
         yield Finding(
             "AS001", f"MCP server '{name}' appears to expose shell execution to the model",
-            "HIGH", relpath, _line_of(raw, name), f"{cmd} {joined}"[:100],
+            "HIGH" if by_pkg else "MEDIUM", relpath, _line_of(raw, name), f"{cmd} {joined}"[:100],
             "A shell or command-execution MCP server gives any prompt injection a "
             "shell. Remove it or confine it to a sandbox.",
-            confidence="medium", heuristic=True)
+            confidence="medium" if by_pkg else "low", heuristic=True)
 
     if "server-filesystem" in joined or "filesystem" in name.lower():
         for a in args:
@@ -771,17 +862,23 @@ def _check_mcp_server(name, spec, raw, relpath, emitted) -> Iterator[Finding]:
         if not re.search(r"@\d+\.\d+\.\d+", u):
             yield _unpinned(name, relpath, raw, f"deno run {u}", "remote module without version", "module")
 
-    url = spec.get("url") or spec.get("serverUrl") or spec.get("httpUrl") or spec.get("baseUrl")
+    url = spec.get("url") or spec.get("serverUrl") or spec.get("httpUrl") or \
+        spec.get("baseUrl") or spec.get("uri")
     if isinstance(url, str) and re.match(r"^(https?|wss?)://", url):
         local = re.search(r"://(localhost|127\.\d+\.\d+\.\d+|0\.0\.0\.0|\[::1\])([:/]|$)", url)
         if not local:
+            host = _url_host(url)
             if url.lower().startswith(("http://", "ws://")):
+                private = _is_private_host(host)
                 yield Finding(
-                    "AS010", f"MCP server '{name}' uses an unencrypted remote transport",
-                    "HIGH", relpath, _line_of(raw, url), url,
+                    "AS010", f"MCP server '{name}' uses an unencrypted "
+                    f"{'private-network' if private else 'remote'} transport",
+                    "INFO" if private else "HIGH", relpath, _line_of(raw, url), url,
                     "Use https:// so tool results and credentials cannot be read or "
-                    "altered in transit.",
-                    confidence="high")
+                    "altered in transit." if not private else
+                    "Plain HTTP on a private network or container hostname; confirm it "
+                    "never leaves a trusted segment.",
+                    confidence="medium" if private else "high")
             else:
                 yield Finding(
                     "AS007", f"MCP server '{name}' connects to a remote endpoint",
@@ -789,6 +886,28 @@ def _check_mcp_server(name, spec, raw, relpath, emitted) -> Iterator[Finding]:
                     "Confirm the remote MCP endpoint is trusted; remote servers can inject "
                     "tool results and instructions into the agent.",
                     heuristic=True, confidence="medium")
+
+
+def _url_host(url: str) -> str:
+    m = re.match(r"^[a-z]+://(?:[^@/]*@)?(\[[^\]]+\]|[^:/?#]+)", url, re.I)
+    return (m.group(1) if m else "").lower().strip("[]")
+
+
+def _is_private_host(host: str) -> bool:
+    if not host:
+        return True
+    if "." not in host and ":" not in host:  # single-label name: container or LAN host
+        return True
+    if host.endswith((".local", ".internal", ".lan", ".localhost", ".test", ".docker",
+                      ".home.arpa", ".ddev.site", ".svc", ".cluster.local")) or \
+            host in ("host.docker.internal", "gateway.docker.internal"):
+        return True
+    m = re.match(r"^(\d+)\.(\d+)\.(\d+)\.(\d+)$", host)
+    if m:
+        a, b = int(m.group(1)), int(m.group(2))
+        return (a == 10 or (a == 172 and 16 <= b <= 31) or (a == 192 and b == 168)
+                or (a == 100 and 64 <= b <= 127) or a == 127 or (a == 169 and b == 254))
+    return host.startswith(("fc", "fd", "fe80")) and ":" in host
 
 
 def _unpinned(name, relpath, raw, evidence, why, kind) -> Finding:

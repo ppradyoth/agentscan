@@ -66,22 +66,26 @@ is present, so it drops straight into CI.
 |------|----------|-----------------|
 | AS001 | Critical / High | Permission bypass (`bypassPermissions`, `--dangerously-skip-permissions`), unrestricted `Bash`/`*` grants, interpreter, package-runner and shell-escape grants (`Bash(python:*)`, `Bash(npx:*)`, `Bash(find:*)`), MCP servers that expose a shell |
 | AS002 | High | MCP filesystem server rooted at `/`, `$HOME`, a user home, a drive root |
-| AS003 | High / Low | Hooks that interpolate tool input into a shell, `eval`, or pipe fetched code to a shell (High); other committed hooks (Low) |
+| AS003 | High / Low | Hooks that `eval` dynamic input or pipe fetched code into a shell (High); other committed hooks, including ones that only read tool input, are Low |
 | AS004 | Critical / High / Medium | Hardcoded credentials: provider-format keys (Anthropic, OpenAI, OpenRouter, GitHub, Slack, Notion, Context7, AWS, ...), credential-named fields with high-entropy values, credentials in URLs, private keys. Redacted in output |
 | AS005 | Low | Instruction files that disable human confirmation (negation-aware, skips code fences) |
 | AS006 | Low | External content routed to actions with no injection boundary (heuristic) |
 | AS007 | Medium / Info | MCP servers launched from an unpinned package or image (`npx -y`, `bunx`, `uvx`, `pipx`, `docker run`; floating tags such as `@latest` and version ranges count as unpinned). Remote endpoints are Info |
 | AS008 | Medium / Low | Wildcard tool permissions (`WebFetch(*)`, `Write(*)`); read-only wildcards are ignored |
 | AS009 | Medium / Low | `alwaysAllow` / `autoApprove` lists; Medium only when a tool name implies side effects |
-| AS010 | High | MCP server over an unencrypted remote transport (`http://`, `ws://`) |
+| AS010 | High / Info | MCP server over an unencrypted transport (`http://`, `ws://`); private-network and container hosts are Info |
 | AS011 | Medium | `enableAllProjectMcpServers: true` (auto-trusts MCP servers a cloned repo declares) |
 | AS012 | High | Invisible or bidirectional Unicode in instruction files and skills (rules-file backdoor) |
 | AS013 | High | Skills, commands and agents whose `allowed-tools` pre-approve arbitrary execution |
+| AS014 | Medium / Low | Project settings that run a command at session start (`apiKeyHelper`, `statusLine`, AWS helpers) or register extra plugin marketplaces |
 
-Covers Claude Code (`CLAUDE.md`, `.claude/settings*.json`, `.mcp.json`, skills, commands, agents),
-Claude Desktop, Cursor, VS Code (`servers`), Cline/Roo, Windsurf, Gemini CLI, Codex
-(`config.toml`), Zed, and Copilot instruction files. JSON with comments and trailing commas
-is parsed.
+Covers Claude Code (`CLAUDE.md`, `.claude/settings*.json`, `.mcp.json`, skills, commands, agents,
+plugin `hooks.json`), Claude Desktop, Cursor (`mcp.json`, `.cursor/rules/*.mdc`), VS Code (`servers`,
+`mcp.servers`), Cline/Roo, Windsurf, Gemini CLI, Codex (`config.toml`), Zed (`context_servers`),
+Continue (list-style `mcpServers`), opencode (`mcp`, array `command`), Amazon Q, Kiro (`steering`),
+and Copilot/AGENTS/guidelines instruction files. JSON with comments and trailing commas is parsed.
+Backup copies (`*.bak`, `*.orig`, `~`) are scanned at full severity and marked `context: backup`,
+because they still leak secrets; `.example`, `.template` and `.dist` copies are treated as fixtures.
 
 ### Confidence and context
 
